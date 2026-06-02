@@ -19,6 +19,15 @@ struct Message {
     text: String,
 }
 
+impl Message {
+    fn new(from: impl Into<String>, text: impl Into<String>) -> Message {
+        Message {
+            from: from.into(),
+            text: text.into(),
+        }
+    }
+}
+
 impl Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(f, "{}: {}", self.from, self.text)
@@ -71,16 +80,13 @@ where
     });
 }
 
-async fn propagate_messages<R>(reader: R, sender: Sender, client: String) -> Result<()>
+async fn propagate_messages<R>(reader: R, sender: Sender, client: &str) -> Result<()>
 where
     R: AsyncBufRead + Unpin,
 {
     let mut lines = reader.lines();
-    while let Some(msg) = lines.next_line().await? {
-        if let Err(e) = sender.send(Message {
-            from: client.trim().to_string(),
-            text: msg,
-        }) {
+    while let Some(text) = lines.next_line().await? {
+        if let Err(e) = sender.send(Message::new(client, text)) {
             eprintln!("error sending message {e}");
         }
     }
@@ -98,7 +104,7 @@ async fn handle(stream: TcpStream, sender: Sender) -> Result<()> {
 
     spawn_message_writer(writer, sender.clone(), name.clone());
 
-    propagate_messages(reader, sender, name).await?;
+    propagate_messages(reader, sender, &name).await?;
 
     Ok(())
 }
