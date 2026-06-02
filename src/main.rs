@@ -73,7 +73,7 @@ where
     W: tokio::io::AsyncWrite + Unpin,
 {
     while let Ok(msg) = receiver.recv().await {
-        if *client != msg.from {
+        if &msg.from != client {
             writer.write_all(msg.to_string().as_bytes()).await?;
         }
     }
