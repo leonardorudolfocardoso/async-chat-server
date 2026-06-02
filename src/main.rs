@@ -50,7 +50,7 @@ where
 {
     while let Ok(msg) = receiver.recv().await {
         if msg.sender != client {
-            writer.write_all(msg.to_string().as_bytes()).await.unwrap();
+            writer.write_all(msg.to_string().as_bytes()).await?;
         }
     }
     Ok(())
