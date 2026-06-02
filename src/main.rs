@@ -8,6 +8,8 @@ use tokio::{
 type Sender = tokio::sync::broadcast::Sender<Message>;
 type Receiver = tokio::sync::broadcast::Receiver<Message>;
 
+const DEFAULT_ADDR: &str = "127.0.0.1:8080";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Name(String);
 
@@ -119,13 +121,17 @@ async fn handle(stream: TcpStream, sender: Sender) -> Result<()> {
     Ok(())
 }
 
+fn bind_addr_from_args(mut args: impl Iterator<Item = String>) -> String {
+    args.next().unwrap_or_else(|| DEFAULT_ADDR.to_string())
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let addr = "127.0.0.1:8080";
+    let addr = bind_addr_from_args(std::env::args().skip(1));
 
     let (tx, _) = tokio::sync::broadcast::channel::<Message>(16);
 
-    match TcpListener::bind(addr).await {
+    match TcpListener::bind(&addr).await {
         // server binded
         Ok(listener) => loop {
             match listener.accept().await {
@@ -162,6 +168,20 @@ mod tests {
 
         assert_eq!(&message.from, &name);
         assert_eq!(message.text, "hello");
+    }
+
+    #[test]
+    fn bind_addr_from_args_uses_default_when_arg_is_missing() {
+        let addr = bind_addr_from_args(std::iter::empty());
+
+        assert_eq!(addr, DEFAULT_ADDR);
+    }
+
+    #[test]
+    fn bind_addr_from_args_uses_first_arg() {
+        let addr = bind_addr_from_args(["0.0.0.0:9000".to_string()].into_iter());
+
+        assert_eq!(addr, "0.0.0.0:9000");
     }
 
     #[tokio::test]
