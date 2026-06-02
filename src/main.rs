@@ -144,3 +144,69 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn name_from_string_trims_whitespace() {
+        let name = Name::from("  alice\n".to_string());
+
+        assert_eq!(name, Name("alice".to_string()));
+    }
+
+    #[test]
+    fn message_new_preserves_sender_and_text() {
+        let name = Name::from("alice".to_string());
+        let message = Message::new(name.clone(), "hello");
+
+        assert_eq!(&message.from, &name);
+        assert_eq!(message.text, "hello");
+    }
+
+    #[tokio::test]
+    async fn propagate_messages_broadcasts_each_input_line() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let reader = BufReader::new("hello\nworld\n".as_bytes());
+        let client = Name::from("alice".to_string());
+
+        propagate_messages(reader, tx, client.clone())
+            .await
+            .unwrap();
+
+        let first = rx.recv().await.unwrap();
+        assert_eq!(&first.from, &client);
+        assert_eq!(first.text, "hello");
+
+        let second = rx.recv().await.unwrap();
+        assert_eq!(&second.from, &client);
+        assert_eq!(second.text, "world");
+    }
+
+    #[tokio::test]
+    async fn write_messages_writes_other_clients_only() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let (mut output, mut writer) = tokio::io::duplex(1024);
+        let client = Name::from("alice".to_string());
+        let writer_client = client.clone();
+
+        let write_task =
+            tokio::spawn(async move { write_messages(&mut writer, &mut rx, &writer_client).await });
+
+        tx.send(Message::new(client, "own message")).unwrap();
+
+        let other_message = Message::new(Name::from("bob".to_string()), "hello alice");
+        let expected = other_message.to_string();
+        tx.send(other_message).unwrap();
+        drop(tx);
+
+        write_task.await.unwrap().unwrap();
+
+        let mut written = String::new();
+        output.read_to_string(&mut written).await.unwrap();
+
+        assert_eq!(written, expected);
+    }
+}
