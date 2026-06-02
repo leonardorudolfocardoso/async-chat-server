@@ -2,9 +2,13 @@ use std::{fmt::Display, io::Result};
 
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{TcpListener, TcpStream},
-    sync::broadcast::Sender,
+    net::{
+        TcpListener, TcpStream,
+        tcp::{OwnedReadHalf, OwnedWriteHalf},
+    },
 };
+
+type Sender = tokio::sync::broadcast::Sender<Message>;
 
 type Id = String;
 
@@ -20,33 +24,45 @@ impl Display for Message {
     }
 }
 
-async fn handle(stream: TcpStream, sender: Sender<Message>) -> Result<()> {
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
+async fn ask_name(
+    reader: &mut BufReader<OwnedReadHalf>,
+    writer: &mut OwnedWriteHalf,
+) -> Result<String> {
     let msg = b"tell me your name\n";
     writer.write_all(msg).await?;
 
     let mut name = String::new();
     reader.read_line(&mut name).await?;
+    let name = name.trim().to_owned();
 
-    let msg = format!("welcome {name}");
-    writer.write_all(msg.as_bytes()).await?;
+    Ok(name)
+}
 
-    let writer_sender = sender.clone();
-    let writer_name = name.clone();
+async fn greet(writer: &mut OwnedWriteHalf, name: &str) -> Result<()> {
+    let greetings = format!("welcome {name}");
+    writer.write_all(greetings.as_bytes()).await
+}
+
+fn spawn_message_writer(mut writer: OwnedWriteHalf, sender: Sender, client: String) {
     tokio::spawn(async move {
-        while let Ok(msg) = writer_sender.subscribe().recv().await {
-            if msg.sender != writer_name.trim() {
+        while let Ok(msg) = sender.subscribe().recv().await {
+            if msg.sender != client {
                 writer.write_all(msg.to_string().as_bytes()).await.unwrap();
             }
         }
     });
+}
 
+async fn listen_messages(
+    reader: BufReader<OwnedReadHalf>,
+    sender: Sender,
+    client: String,
+) -> Result<()> {
     let mut lines = reader.lines();
     while let Some(msg) = lines.next_line().await? {
         sender
             .send(Message {
-                sender: name.trim().to_string(),
+                sender: client.trim().to_string(),
                 text: msg,
             })
             .unwrap();
@@ -55,30 +71,41 @@ async fn handle(stream: TcpStream, sender: Sender<Message>) -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()?;
+async fn handle(stream: TcpStream, sender: Sender) -> Result<()> {
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+
+    let name = ask_name(&mut reader, &mut writer).await?;
+
+    greet(&mut writer, &name).await?;
+
+    spawn_message_writer(writer, sender.clone(), name.clone());
+
+    listen_messages(reader, sender, name).await?;
+
+    Ok(())
+}
+
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> Result<()> {
     let addr = "127.0.0.1:8080";
 
-    rt.block_on(async {
-        let (tx, _) = tokio::sync::broadcast::channel::<Message>(16);
+    let (tx, _) = tokio::sync::broadcast::channel::<Message>(16);
 
-        match TcpListener::bind(addr).await {
-            // server binded
-            Ok(listener) => loop {
-                match listener.accept().await {
-                    // client connected
-                    Ok((stream, _)) => {
-                        let sender = tx.clone();
-                        rt.spawn(async move { handle(stream, sender).await });
-                    }
-                    Err(e) => eprintln!("{e}"),
+    match TcpListener::bind(addr).await {
+        // server binded
+        Ok(listener) => loop {
+            match listener.accept().await {
+                // client connected
+                Ok((stream, _)) => {
+                    let sender = tx.clone();
+                    tokio::spawn(async move { handle(stream, sender).await });
                 }
-            },
-            Err(e) => eprintln!("{e}"),
-        }
-    });
+                Err(e) => eprintln!("{e}"),
+            }
+        },
+        Err(e) => eprintln!("{e}"),
+    }
 
     Ok(())
 }
