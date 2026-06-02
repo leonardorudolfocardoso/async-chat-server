@@ -165,6 +165,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ask_name_prompts_and_returns_trimmed_name() {
+        let mut reader = BufReader::new("  alice\n".as_bytes());
+        let mut writer = Vec::new();
+
+        let name = ask_name(&mut reader, &mut writer).await.unwrap();
+
+        assert_eq!(name, Name("alice".to_string()));
+        assert_eq!(writer, b"tell me your name\n".to_vec());
+    }
+
+    #[tokio::test]
     async fn propagate_messages_broadcasts_each_input_line() {
         let (tx, mut rx) = tokio::sync::broadcast::channel(16);
         let reader = BufReader::new("hello\nworld\n".as_bytes());
