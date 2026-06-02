@@ -11,11 +11,11 @@ use tokio::{
 type Sender = tokio::sync::broadcast::Sender<Message>;
 type Receiver = tokio::sync::broadcast::Receiver<Message>;
 
-type Client = String;
+type User = String;
 
 #[derive(Debug, Clone)]
 struct Message {
-    from: Client,
+    from: User,
     text: String,
 }
 
