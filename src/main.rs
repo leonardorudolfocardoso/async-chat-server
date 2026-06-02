@@ -11,18 +11,31 @@ use tokio::{
 type Sender = tokio::sync::broadcast::Sender<Message>;
 type Receiver = tokio::sync::broadcast::Receiver<Message>;
 
-type User = String;
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Name(String);
 
 #[derive(Debug, Clone)]
 struct Message {
-    from: User,
+    from: Name,
     text: String,
 }
 
+impl From<String> for Name {
+    fn from(value: String) -> Self {
+        Name(value.trim().to_owned())
+    }
+}
+
+impl Display for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl Message {
-    fn new(from: impl Into<String>, text: impl Into<String>) -> Message {
+    fn new(from: Name, text: impl Into<String>) -> Message {
         Message {
-            from: from.into(),
+            from,
             text: text.into(),
         }
     }
@@ -30,25 +43,24 @@ impl Message {
 
 impl Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "{}: {}", self.from, self.text)
+        write!(f, "{}: {}", self.from, self.text)
     }
 }
 
 async fn ask_name(
     reader: &mut BufReader<OwnedReadHalf>,
     writer: &mut OwnedWriteHalf,
-) -> Result<String> {
+) -> Result<Name> {
     let msg = b"tell me your name\n";
     writer.write_all(msg).await?;
 
     let mut name = String::new();
     reader.read_line(&mut name).await?;
-    let name = name.trim().to_owned();
 
-    Ok(name)
+    Ok(name.into())
 }
 
-async fn greet<W>(writer: &mut W, name: &str) -> Result<()>
+async fn greet<W>(writer: &mut W, name: &Name) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {
@@ -56,19 +68,19 @@ where
     writer.write_all(greetings.as_bytes()).await
 }
 
-async fn write_messages<W>(writer: &mut W, receiver: &mut Receiver, client: &str) -> Result<()>
+async fn write_messages<W>(writer: &mut W, receiver: &mut Receiver, client: &Name) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
     while let Ok(msg) = receiver.recv().await {
-        if msg.from != client {
+        if *client != msg.from {
             writer.write_all(msg.to_string().as_bytes()).await?;
         }
     }
     Ok(())
 }
 
-fn spawn_message_writer<W>(mut writer: W, sender: Sender, client: String)
+fn spawn_message_writer<W>(mut writer: W, sender: Sender, client: Name)
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
@@ -80,13 +92,13 @@ where
     });
 }
 
-async fn propagate_messages<R>(reader: R, sender: Sender, client: &str) -> Result<()>
+async fn propagate_messages<R>(reader: R, sender: Sender, client: Name) -> Result<()>
 where
     R: AsyncBufRead + Unpin,
 {
     let mut lines = reader.lines();
     while let Some(text) = lines.next_line().await? {
-        if let Err(e) = sender.send(Message::new(client, text)) {
+        if let Err(e) = sender.send(Message::new(client.clone(), text)) {
             eprintln!("error sending message {e}");
         }
     }
@@ -104,7 +116,7 @@ async fn handle(stream: TcpStream, sender: Sender) -> Result<()> {
 
     spawn_message_writer(writer, sender.clone(), name.clone());
 
-    propagate_messages(reader, sender, &name).await?;
+    propagate_messages(reader, sender, name).await?;
 
     Ok(())
 }
