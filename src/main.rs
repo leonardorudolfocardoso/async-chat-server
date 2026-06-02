@@ -11,17 +11,17 @@ use tokio::{
 type Sender = tokio::sync::broadcast::Sender<Message>;
 type Receiver = tokio::sync::broadcast::Receiver<Message>;
 
-type Id = String;
+type Client = String;
 
 #[derive(Debug, Clone)]
 struct Message {
-    sender: Id,
+    from: Client,
     text: String,
 }
 
 impl Display for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        writeln!(f, "{}: {}", self.sender, self.text)
+        writeln!(f, "{}: {}", self.from, self.text)
     }
 }
 
@@ -49,7 +49,7 @@ where
     W: tokio::io::AsyncWrite + Unpin,
 {
     while let Ok(msg) = receiver.recv().await {
-        if msg.sender != client {
+        if msg.from != client {
             writer.write_all(msg.to_string().as_bytes()).await?;
         }
     }
@@ -74,7 +74,7 @@ async fn listen_messages(
     while let Some(msg) = lines.next_line().await? {
         sender
             .send(Message {
-                sender: client.trim().to_string(),
+                from: client.trim().to_string(),
                 text: msg,
             })
             .unwrap();
