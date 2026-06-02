@@ -77,12 +77,12 @@ where
 {
     let mut lines = reader.lines();
     while let Some(msg) = lines.next_line().await? {
-        sender
-            .send(Message {
-                from: client.trim().to_string(),
-                text: msg,
-            })
-            .unwrap();
+        if let Err(e) = sender.send(Message {
+            from: client.trim().to_string(),
+            text: msg,
+        }) {
+            eprintln!("error sending message {e}");
+        }
     }
 
     Ok(())
