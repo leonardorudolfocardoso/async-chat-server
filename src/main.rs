@@ -1,7 +1,7 @@
 use std::{fmt::Display, io::Result};
 
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::{
         TcpListener, TcpStream,
         tcp::{OwnedReadHalf, OwnedWriteHalf},
@@ -39,7 +39,10 @@ async fn ask_name(
     Ok(name)
 }
 
-async fn greet(writer: &mut OwnedWriteHalf, name: &str) -> Result<()> {
+async fn greet<W>(writer: &mut W, name: &str) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let greetings = format!("welcome {name}");
     writer.write_all(greetings.as_bytes()).await
 }
@@ -56,7 +59,10 @@ where
     Ok(())
 }
 
-fn spawn_message_writer(mut writer: OwnedWriteHalf, sender: Sender, client: String) {
+fn spawn_message_writer<W>(mut writer: W, sender: Sender, client: String)
+where
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     tokio::spawn(async move {
         let mut receiver = sender.subscribe();
         if let Err(e) = write_messages(&mut writer, &mut receiver, &client).await {
@@ -65,11 +71,10 @@ fn spawn_message_writer(mut writer: OwnedWriteHalf, sender: Sender, client: Stri
     });
 }
 
-async fn listen_messages(
-    reader: BufReader<OwnedReadHalf>,
-    sender: Sender,
-    client: String,
-) -> Result<()> {
+async fn propagate_messages<R>(reader: R, sender: Sender, client: String) -> Result<()>
+where
+    R: AsyncBufRead + Unpin,
+{
     let mut lines = reader.lines();
     while let Some(msg) = lines.next_line().await? {
         sender
@@ -93,7 +98,7 @@ async fn handle(stream: TcpStream, sender: Sender) -> Result<()> {
 
     spawn_message_writer(writer, sender.clone(), name.clone());
 
-    listen_messages(reader, sender, name).await?;
+    propagate_messages(reader, sender, name).await?;
 
     Ok(())
 }
