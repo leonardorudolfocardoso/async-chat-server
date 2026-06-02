@@ -9,6 +9,7 @@ use tokio::{
 };
 
 type Sender = tokio::sync::broadcast::Sender<Message>;
+type Receiver = tokio::sync::broadcast::Receiver<Message>;
 
 type Id = String;
 
@@ -43,12 +44,23 @@ async fn greet(writer: &mut OwnedWriteHalf, name: &str) -> Result<()> {
     writer.write_all(greetings.as_bytes()).await
 }
 
+async fn write_messages<W>(writer: &mut W, receiver: &mut Receiver, client: &str) -> Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    while let Ok(msg) = receiver.recv().await {
+        if msg.sender != client {
+            writer.write_all(msg.to_string().as_bytes()).await.unwrap();
+        }
+    }
+    Ok(())
+}
+
 fn spawn_message_writer(mut writer: OwnedWriteHalf, sender: Sender, client: String) {
     tokio::spawn(async move {
-        while let Ok(msg) = sender.subscribe().recv().await {
-            if msg.sender != client {
-                writer.write_all(msg.to_string().as_bytes()).await.unwrap();
-            }
+        let mut receiver = sender.subscribe();
+        if let Err(e) = write_messages(&mut writer, &mut receiver, &client).await {
+            eprintln!("error writing_messages to {client}: {e}");
         }
     });
 }
