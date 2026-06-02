@@ -94,6 +94,28 @@ Important internal boundaries:
 Tokio's broadcast channel is used as the in-process message bus between
 connected clients.
 
+### Message Flow
+
+```mermaid
+sequenceDiagram
+    participant A as Client A
+    participant Server
+    participant Bus as Broadcast Channel
+    participant BWriter as Client B Writer Task
+    participant B as Client B
+
+    A->>Server: connect
+    Server->>A: tell me your name
+    A->>Server: alice
+    Server->>A: welcome alice
+    Server->>Server: spawn writer task
+
+    A->>Server: hello
+    Server->>Bus: publish Message(alice, hello)
+    Bus->>BWriter: deliver message
+    BWriter->>B: alice: hello
+```
+
 ## Current Limitations
 
 - There is no graceful shutdown handling.
