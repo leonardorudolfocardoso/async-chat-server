@@ -2,10 +2,7 @@ use std::{fmt::Display, io::Result};
 
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
-    net::{
-        TcpListener, TcpStream,
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
-    },
+    net::{TcpListener, TcpStream},
 };
 
 type Sender = tokio::sync::broadcast::Sender<Message>;
@@ -47,10 +44,11 @@ impl Display for Message {
     }
 }
 
-async fn ask_name(
-    reader: &mut BufReader<OwnedReadHalf>,
-    writer: &mut OwnedWriteHalf,
-) -> Result<Name> {
+async fn ask_name<R, W>(reader: &mut R, writer: &mut W) -> Result<Name>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let msg = b"tell me your name\n";
     writer.write_all(msg).await?;
 
