@@ -3,6 +3,7 @@ use std::{fmt::Display, io::Result};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
+    sync::broadcast::error::RecvError,
 };
 
 type Sender = tokio::sync::broadcast::Sender<Message>;
@@ -72,9 +73,15 @@ async fn write_messages<W>(writer: &mut W, receiver: &mut Receiver, client: &Nam
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
-    while let Ok(msg) = receiver.recv().await {
-        if &msg.from != client {
-            writer.write_all(msg.to_string().as_bytes()).await?;
+    loop {
+        match receiver.recv().await {
+            Ok(msg) => {
+                if &msg.from != client {
+                    writer.write_all(msg.to_string().as_bytes()).await?;
+                }
+            }
+            Err(RecvError::Lagged(_)) => continue,
+            Err(RecvError::Closed) => break,
         }
     }
     Ok(())
@@ -232,6 +239,28 @@ mod tests {
         drop(tx);
 
         write_task.await.unwrap().unwrap();
+
+        let mut written = String::new();
+        output.read_to_string(&mut written).await.unwrap();
+
+        assert_eq!(written, expected);
+    }
+
+    #[tokio::test]
+    async fn write_messages_continues_after_lagging() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel(1); // limited sized channel
+        let (mut output, mut writer) = tokio::io::duplex(1024);
+        let client = Name::from("alice".to_string());
+
+        let missed = Message::new(Name::from("bob".to_string()), "missed");
+        let overwritten = Message::new(Name::from("bob".to_string()), "latest");
+        let expected = overwritten.to_string();
+        tx.send(missed).unwrap();
+        tx.send(overwritten).unwrap();
+        drop(tx);
+
+        write_messages(&mut writer, &mut rx, &client).await.unwrap();
+        drop(writer);
 
         let mut written = String::new();
         output.read_to_string(&mut written).await.unwrap();
