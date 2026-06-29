@@ -47,25 +47,24 @@ impl Display for Message {
     }
 }
 
-async fn ask_name<R, W>(reader: &mut R, writer: &mut W) -> Result<Name>
+async fn ask<R, W>(msg: &str, reader: &mut R, writer: &mut W) -> Result<String>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let msg = b"tell me your name\n";
-    writer.write_all(msg).await?;
+    writer.write_all(msg.as_bytes()).await?;
 
-    let mut name = String::new();
-    reader.read_line(&mut name).await?;
+    let mut response = String::new();
+    reader.read_line(&mut response).await?;
 
-    Ok(name.into())
+    Ok(response)
 }
 
-async fn greet<W>(writer: &mut W, name: &Name) -> Result<()>
+async fn greet<W>(writer: &mut W, room: &Name, name: &Name) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    let greetings = format!("welcome {name}");
+    let greetings = format!("welcome to room {room}, {name}");
     writer.write_all(greetings.as_bytes()).await
 }
 
@@ -117,9 +116,13 @@ async fn handle(stream: TcpStream, sender: Sender) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
-    let name = ask_name(&mut reader, &mut writer).await?;
-
-    greet(&mut writer, &name).await?;
+    let name = ask("tell me your name\n", &mut reader, &mut writer)
+        .await?
+        .into();
+    let room = ask("tell me your room\n", &mut reader, &mut writer)
+        .await?
+        .into();
+    greet(&mut writer, &room, &name).await?;
 
     spawn_message_writer(writer, sender.clone(), name.clone());
 
@@ -192,14 +195,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ask_name_prompts_and_returns_trimmed_name() {
-        let mut reader = BufReader::new("  alice\n".as_bytes());
+    async fn ask_prompts_and_returns_response() {
+        let mut reader = BufReader::new(" some response\n".as_bytes());
         let mut writer = Vec::new();
 
-        let name = ask_name(&mut reader, &mut writer).await.unwrap();
+        let response = ask("a question\n", &mut reader, &mut writer).await.unwrap();
 
-        assert_eq!(name, Name("alice".to_string()));
-        assert_eq!(writer, b"tell me your name\n".to_vec());
+        assert_eq!(response, " some response\n".to_string());
+        assert_eq!(writer, b"a question\n".to_vec());
     }
 
     #[tokio::test]
