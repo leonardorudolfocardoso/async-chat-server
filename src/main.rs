@@ -25,7 +25,7 @@ async fn greet<W>(writer: &mut W, room: &RoomName, name: &Client) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    let greetings = format!("welcome to room {room}, {name}");
+    let greetings = format!("welcome to room {room}, {name}\n");
     writer.write_all(greetings.as_bytes()).await
 }
 
@@ -45,7 +45,8 @@ where
     W: AsyncWrite + Unpin,
 {
     while let Some(message) = inbox.receive().await {
-        writer.write_all(message.to_string().as_bytes()).await?;
+        let text = format!("{}\n", message);
+        writer.write_all(text.as_bytes()).await?;
     }
 
     Ok(())
@@ -187,6 +188,6 @@ mod tests {
         let mut written = String::new();
         output.read_to_string(&mut written).await.unwrap();
 
-        assert_eq!(written, "bob: hello");
+        assert_eq!(written, "bob: hello\n");
     }
 }
