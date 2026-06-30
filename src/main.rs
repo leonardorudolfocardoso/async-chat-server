@@ -1,14 +1,10 @@
 use std::io::Result;
 
-use async_chat_server::{Client, Message};
+use async_chat_server::{ChatHub, Client, RoomInbox, RoomName, RoomPublisher};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
-    sync::broadcast::error::RecvError,
 };
-
-type Sender = tokio::sync::broadcast::Sender<Message>;
-type Receiver = tokio::sync::broadcast::Receiver<Message>;
 
 const DEFAULT_ADDR: &str = "127.0.0.1:8080";
 
@@ -25,7 +21,7 @@ where
     Ok(response)
 }
 
-async fn greet<W>(writer: &mut W, room: &Client, name: &Client) -> Result<()>
+async fn greet<W>(writer: &mut W, room: &RoomName, name: &Client) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {
@@ -33,43 +29,35 @@ where
     writer.write_all(greetings.as_bytes()).await
 }
 
-async fn write_messages<W>(writer: &mut W, receiver: &mut Receiver, client: &Client) -> Result<()>
-where
-    W: tokio::io::AsyncWrite + Unpin,
-{
-    loop {
-        match receiver.recv().await {
-            Ok(msg) => {
-                if !msg.is_from(client) {
-                    writer.write_all(msg.to_string().as_bytes()).await?;
-                }
-            }
-            Err(RecvError::Lagged(_)) => continue,
-            Err(RecvError::Closed) => break,
-        }
-    }
-    Ok(())
-}
-
-fn spawn_message_writer<W>(mut writer: W, sender: Sender, client: Client)
+fn spawn_message_writer<W>(mut writer: W, mut inbox: RoomInbox)
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     tokio::spawn(async move {
-        let mut receiver = sender.subscribe();
-        if let Err(e) = write_messages(&mut writer, &mut receiver, &client).await {
-            eprintln!("error writing_messages to {client}: {e}");
+        if let Err(e) = write_messages(&mut writer, &mut inbox).await {
+            eprintln!("error writing messages: {e}");
         }
     });
 }
 
-async fn propagate_messages<R>(reader: R, sender: Sender, client: Client) -> Result<()>
+async fn write_messages<W>(writer: &mut W, inbox: &mut RoomInbox) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    while let Some(message) = inbox.receive().await {
+        writer.write_all(message.to_string().as_bytes()).await?;
+    }
+
+    Ok(())
+}
+
+async fn propagate_messages<R>(reader: R, publisher: RoomPublisher) -> Result<()>
 where
     R: AsyncBufRead + Unpin,
 {
     let mut lines = reader.lines();
     while let Some(text) = lines.next_line().await? {
-        if let Err(e) = sender.send(Message::new(client.clone(), text)) {
+        if let Err(e) = publisher.publish(text) {
             eprintln!("error sending message {e}");
         }
     }
@@ -77,21 +65,24 @@ where
     Ok(())
 }
 
-async fn handle(stream: TcpStream, sender: Sender) -> Result<()> {
+async fn handle(stream: TcpStream, hub: ChatHub) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
-    let name = ask("tell me your name\n", &mut reader, &mut writer)
+    let client = ask("who are you?\n", &mut reader, &mut writer)
         .await?
         .into();
     let room = ask("tell me your room\n", &mut reader, &mut writer)
         .await?
         .into();
-    greet(&mut writer, &room, &name).await?;
+    greet(&mut writer, &room, &client).await?;
 
-    spawn_message_writer(writer, sender.clone(), name.clone());
+    let membership = hub.join(room, client);
+    let (publisher, inbox) = membership.split();
 
-    propagate_messages(reader, sender, name).await?;
+    spawn_message_writer(writer, inbox);
+
+    propagate_messages(reader, publisher).await?;
 
     Ok(())
 }
@@ -104,7 +95,7 @@ fn bind_addr_from_args(mut args: impl Iterator<Item = String>) -> String {
 async fn main() -> Result<()> {
     let addr = bind_addr_from_args(std::env::args().skip(1));
 
-    let (tx, _) = tokio::sync::broadcast::channel::<Message>(16);
+    let hub = ChatHub::new();
 
     match TcpListener::bind(&addr).await {
         // server binded
@@ -112,8 +103,8 @@ async fn main() -> Result<()> {
             match listener.accept().await {
                 // client connected
                 Ok((stream, _)) => {
-                    let sender = tx.clone();
-                    tokio::spawn(async move { handle(stream, sender).await });
+                    let hub = hub.clone();
+                    tokio::spawn(async move { handle(stream, hub).await });
                 }
                 Err(e) => eprintln!("{e}"),
             }
@@ -156,67 +147,46 @@ mod tests {
 
     #[tokio::test]
     async fn propagate_messages_broadcasts_each_input_line() {
-        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+        let hub = ChatHub::new();
         let reader = BufReader::new("hello\nworld\n".as_bytes());
-        let client = Client::from("alice".to_string());
+        let room_a = RoomName::from("Room A");
+        let alice = Client::from("alice");
+        let bob = Client::from("bob");
+        let (alices_publisher, _) = hub.join(room_a.clone(), alice.clone()).split();
+        let (_, mut bobs_inbox) = hub.join(room_a, bob.clone()).split();
 
-        propagate_messages(reader, tx, client.clone())
-            .await
-            .unwrap();
+        propagate_messages(reader, alices_publisher).await.unwrap();
 
-        let first = rx.recv().await.unwrap();
-        assert!(&first.is_from(&client));
+        let first = bobs_inbox.receive().await.unwrap();
+        assert!(&first.is_from(&alice));
         assert_eq!(first.text(), "hello");
 
-        let second = rx.recv().await.unwrap();
-        assert!(&second.is_from(&client));
+        let second = bobs_inbox.receive().await.unwrap();
+        assert!(&second.is_from(&alice));
         assert_eq!(second.text(), "world");
     }
 
     #[tokio::test]
-    async fn write_messages_writes_other_clients_only() {
-        let (tx, mut rx) = tokio::sync::broadcast::channel(16);
+    async fn write_messages_includes_the_sender() {
+        let hub = ChatHub::new();
+        let room = RoomName::from("Room A");
+        let (alice_publisher, mut alice_inbox) =
+            hub.join(room.clone(), Client::from("alice")).split();
+        let (bob_publisher, bob_inbox) = hub.join(room, Client::from("bob")).split();
         let (mut output, mut writer) = tokio::io::duplex(1024);
-        let client = Client::from("alice".to_string());
-        let writer_client = client.clone();
 
-        let write_task =
-            tokio::spawn(async move { write_messages(&mut writer, &mut rx, &writer_client).await });
+        bob_publisher.publish("hello".to_string()).unwrap();
+        drop(alice_publisher);
+        drop(bob_publisher);
+        drop(bob_inbox);
+        drop(hub);
 
-        tx.send(Message::new(client, "own message")).unwrap();
-
-        let other_message = Message::new(Client::from("bob".to_string()), "hello alice");
-        let expected = other_message.to_string();
-        tx.send(other_message).unwrap();
-        drop(tx);
-
-        write_task.await.unwrap().unwrap();
-
-        let mut written = String::new();
-        output.read_to_string(&mut written).await.unwrap();
-
-        assert_eq!(written, expected);
-    }
-
-    #[tokio::test]
-    async fn write_messages_continues_after_lagging() {
-        let (tx, mut rx) = tokio::sync::broadcast::channel(1); // limited sized channel
-        let (mut output, mut writer) = tokio::io::duplex(1024);
-        let client = Client::from("alice".to_string());
-
-        let missed = Message::new(Client::from("bob".to_string()), "missed");
-        let overwritten = Message::new(Client::from("bob".to_string()), "latest");
-        let expected = overwritten.to_string();
-        tx.send(missed).unwrap();
-        tx.send(overwritten).unwrap();
-        drop(tx);
-
-        write_messages(&mut writer, &mut rx, &client).await.unwrap();
+        write_messages(&mut writer, &mut alice_inbox).await.unwrap();
         drop(writer);
 
         let mut written = String::new();
         output.read_to_string(&mut written).await.unwrap();
 
-        assert_eq!(written, expected);
+        assert_eq!(written, "bob: hello");
     }
 }
