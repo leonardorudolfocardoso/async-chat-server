@@ -1,5 +1,6 @@
-use std::{fmt::Display, io::Result};
+use std::io::Result;
 
+use async_chat_server::{Client, Message};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
@@ -10,42 +11,6 @@ type Sender = tokio::sync::broadcast::Sender<Message>;
 type Receiver = tokio::sync::broadcast::Receiver<Message>;
 
 const DEFAULT_ADDR: &str = "127.0.0.1:8080";
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Name(String);
-
-#[derive(Debug, Clone)]
-struct Message {
-    from: Name,
-    text: String,
-}
-
-impl From<String> for Name {
-    fn from(value: String) -> Self {
-        Name(value.trim().to_owned())
-    }
-}
-
-impl Display for Name {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl Message {
-    fn new(from: Name, text: impl Into<String>) -> Message {
-        Message {
-            from,
-            text: text.into(),
-        }
-    }
-}
-
-impl Display for Message {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.from, self.text)
-    }
-}
 
 async fn ask<R, W>(msg: &str, reader: &mut R, writer: &mut W) -> Result<String>
 where
@@ -60,7 +25,7 @@ where
     Ok(response)
 }
 
-async fn greet<W>(writer: &mut W, room: &Name, name: &Name) -> Result<()>
+async fn greet<W>(writer: &mut W, room: &Client, name: &Client) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {
@@ -68,14 +33,14 @@ where
     writer.write_all(greetings.as_bytes()).await
 }
 
-async fn write_messages<W>(writer: &mut W, receiver: &mut Receiver, client: &Name) -> Result<()>
+async fn write_messages<W>(writer: &mut W, receiver: &mut Receiver, client: &Client) -> Result<()>
 where
     W: tokio::io::AsyncWrite + Unpin,
 {
     loop {
         match receiver.recv().await {
             Ok(msg) => {
-                if &msg.from != client {
+                if !msg.is_from(client) {
                     writer.write_all(msg.to_string().as_bytes()).await?;
                 }
             }
@@ -86,7 +51,7 @@ where
     Ok(())
 }
 
-fn spawn_message_writer<W>(mut writer: W, sender: Sender, client: Name)
+fn spawn_message_writer<W>(mut writer: W, sender: Sender, client: Client)
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
@@ -98,7 +63,7 @@ where
     });
 }
 
-async fn propagate_messages<R>(reader: R, sender: Sender, client: Name) -> Result<()>
+async fn propagate_messages<R>(reader: R, sender: Sender, client: Client) -> Result<()>
 where
     R: AsyncBufRead + Unpin,
 {
@@ -165,22 +130,6 @@ mod tests {
     use tokio::io::AsyncReadExt;
 
     #[test]
-    fn name_from_string_trims_whitespace() {
-        let name = Name::from("  alice\n".to_string());
-
-        assert_eq!(name, Name("alice".to_string()));
-    }
-
-    #[test]
-    fn message_new_preserves_sender_and_text() {
-        let name = Name::from("alice".to_string());
-        let message = Message::new(name.clone(), "hello");
-
-        assert_eq!(&message.from, &name);
-        assert_eq!(message.text, "hello");
-    }
-
-    #[test]
     fn bind_addr_from_args_uses_default_when_arg_is_missing() {
         let addr = bind_addr_from_args(std::iter::empty());
 
@@ -209,26 +158,26 @@ mod tests {
     async fn propagate_messages_broadcasts_each_input_line() {
         let (tx, mut rx) = tokio::sync::broadcast::channel(16);
         let reader = BufReader::new("hello\nworld\n".as_bytes());
-        let client = Name::from("alice".to_string());
+        let client = Client::from("alice".to_string());
 
         propagate_messages(reader, tx, client.clone())
             .await
             .unwrap();
 
         let first = rx.recv().await.unwrap();
-        assert_eq!(&first.from, &client);
-        assert_eq!(first.text, "hello");
+        assert!(&first.is_from(&client));
+        assert_eq!(first.text(), "hello");
 
         let second = rx.recv().await.unwrap();
-        assert_eq!(&second.from, &client);
-        assert_eq!(second.text, "world");
+        assert!(&second.is_from(&client));
+        assert_eq!(second.text(), "world");
     }
 
     #[tokio::test]
     async fn write_messages_writes_other_clients_only() {
         let (tx, mut rx) = tokio::sync::broadcast::channel(16);
         let (mut output, mut writer) = tokio::io::duplex(1024);
-        let client = Name::from("alice".to_string());
+        let client = Client::from("alice".to_string());
         let writer_client = client.clone();
 
         let write_task =
@@ -236,7 +185,7 @@ mod tests {
 
         tx.send(Message::new(client, "own message")).unwrap();
 
-        let other_message = Message::new(Name::from("bob".to_string()), "hello alice");
+        let other_message = Message::new(Client::from("bob".to_string()), "hello alice");
         let expected = other_message.to_string();
         tx.send(other_message).unwrap();
         drop(tx);
@@ -253,10 +202,10 @@ mod tests {
     async fn write_messages_continues_after_lagging() {
         let (tx, mut rx) = tokio::sync::broadcast::channel(1); // limited sized channel
         let (mut output, mut writer) = tokio::io::duplex(1024);
-        let client = Name::from("alice".to_string());
+        let client = Client::from("alice".to_string());
 
-        let missed = Message::new(Name::from("bob".to_string()), "missed");
-        let overwritten = Message::new(Name::from("bob".to_string()), "latest");
+        let missed = Message::new(Client::from("bob".to_string()), "missed");
+        let overwritten = Message::new(Client::from("bob".to_string()), "latest");
         let expected = overwritten.to_string();
         tx.send(missed).unwrap();
         tx.send(overwritten).unwrap();
