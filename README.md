@@ -56,6 +56,31 @@ alice: hello
 The sender does not receive their own messages back, and clients in other rooms
 do not receive the message.
 
+## Manual Test
+
+Start the server in one terminal:
+
+```sh
+cargo run
+```
+
+In three other terminals, connect with `nc 127.0.0.1 8080` and join as:
+
+| Client | Room |
+|--------|------|
+| alice  | rust |
+| bob    | rust |
+| carol  | music |
+
+Send a message from Alice and verify that:
+
+- Bob receives `alice: <message>`.
+- Alice does not receive her own message.
+- Carol receives nothing.
+
+Then send messages from Bob and Carol to verify delivery within each room and
+isolation between rooms. Use `Ctrl+C` to close each client and the server.
+
 ## Tests
 
 Run the unit tests:
