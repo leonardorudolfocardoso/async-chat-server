@@ -1,4 +1,4 @@
-use std::{io::Result, str::FromStr};
+use std::{io::Result as IoResult, str::FromStr};
 
 use async_chat_server::{ChatHub, Client, RoomInbox, RoomName, RoomPublisher};
 use tokio::{
@@ -64,7 +64,7 @@ impl FromStr for ClientInput {
     }
 }
 
-async fn ask<R, W>(msg: &str, reader: &mut R, writer: &mut W) -> Result<String>
+async fn ask<R, W>(msg: &str, reader: &mut R, writer: &mut W) -> IoResult<String>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -77,7 +77,7 @@ where
     Ok(response)
 }
 
-async fn greet<W>(writer: &mut W, room: &RoomName, name: &Client) -> Result<()>
+async fn greet<W>(writer: &mut W, room: &RoomName, name: &Client) -> IoResult<()>
 where
     W: AsyncWrite + Unpin,
 {
@@ -85,44 +85,43 @@ where
     writer.write_all(greetings.as_bytes()).await
 }
 
-fn spawn_message_writer<W>(mut writer: W, mut inbox: RoomInbox)
-where
-    W: AsyncWrite + Unpin + Send + 'static,
-{
-    tokio::spawn(async move {
-        if let Err(e) = write_messages(&mut writer, &mut inbox).await {
-            eprintln!("error writing messages: {e}");
-        }
-    });
-}
-
-async fn write_messages<W>(writer: &mut W, inbox: &mut RoomInbox) -> Result<()>
-where
-    W: AsyncWrite + Unpin,
-{
-    while let Some(message) = inbox.receive().await {
-        let text = format!("{}\n", message);
-        writer.write_all(text.as_bytes()).await?;
-    }
-
-    Ok(())
-}
-
-async fn propagate_messages<R>(reader: R, publisher: RoomPublisher) -> Result<()>
+async fn run_joined_session<R, W>(
+    reader: R,
+    writer: &mut W,
+    publisher: RoomPublisher,
+    mut inbox: RoomInbox,
+) -> IoResult<()>
 where
     R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
 {
     let mut lines = reader.lines();
-    while let Some(text) = lines.next_line().await? {
-        if let Err(e) = publisher.publish(text) {
-            eprintln!("error sending message {e}");
+    loop {
+        tokio::select! {
+            input = lines.next_line() => {
+                match input? {
+                    Some(line) => {
+                        if let Err(error) = publisher.publish(line) {
+                            eprintln!("error publishing message: {error}");
+                        }
+                    }
+                    None => return Ok(()),
+                }
+            },
+            message = inbox.receive() => {
+                match message {
+                    Some(message) => {
+                        writer.write_all(message.to_string().as_bytes()).await?;
+                        writer.write_all(b"\n").await?;
+                    },
+                    None => return Ok(()),
+                }
+            }
         }
     }
-
-    Ok(())
 }
 
-async fn handle(stream: TcpStream, hub: ChatHub) -> Result<()> {
+async fn handle(stream: TcpStream, hub: ChatHub) -> IoResult<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
@@ -137,11 +136,7 @@ async fn handle(stream: TcpStream, hub: ChatHub) -> Result<()> {
     let membership = hub.join(room, client);
     let (publisher, inbox) = membership.split();
 
-    spawn_message_writer(writer, inbox);
-
-    propagate_messages(reader, publisher).await?;
-
-    Ok(())
+    run_joined_session(reader, &mut writer, publisher, inbox).await
 }
 
 fn bind_addr_from_args(mut args: impl Iterator<Item = String>) -> String {
@@ -149,7 +144,7 @@ fn bind_addr_from_args(mut args: impl Iterator<Item = String>) -> String {
 }
 
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
+async fn main() -> IoResult<()> {
     let addr = bind_addr_from_args(std::env::args().skip(1));
 
     let hub = ChatHub::new();
@@ -161,7 +156,11 @@ async fn main() -> Result<()> {
                 // client connected
                 Ok((stream, _)) => {
                     let hub = hub.clone();
-                    tokio::spawn(async move { handle(stream, hub).await });
+                    tokio::spawn(async move {
+                        if let Err(error) = handle(stream, hub).await {
+                            eprintln!("connection error: {error}");
+                        }
+                    });
                 }
                 Err(e) => eprintln!("{e}"),
             }
@@ -203,16 +202,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn propagate_messages_broadcasts_each_input_line() {
+    async fn joined_session_broadcasts_each_input_line() {
         let hub = ChatHub::new();
         let reader = BufReader::new("hello\nworld\n".as_bytes());
+        let mut writer = Vec::new();
         let room_a = RoomName::from("Room A");
         let alice = Client::from("alice");
         let bob = Client::from("bob");
-        let (alices_publisher, _) = hub.join(room_a.clone(), alice.clone()).split();
+        let (alices_publisher, alices_inbox) = hub.join(room_a.clone(), alice.clone()).split();
         let (_, mut bobs_inbox) = hub.join(room_a, bob.clone()).split();
 
-        propagate_messages(reader, alices_publisher).await.unwrap();
+        run_joined_session(reader, &mut writer, alices_publisher, alices_inbox)
+            .await
+            .unwrap();
 
         let first = bobs_inbox.receive().await.unwrap();
         assert!(&first.is_from(&alice));
@@ -224,27 +226,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_messages_includes_the_sender() {
+    async fn joined_session_writes_messages_with_the_sender() {
         let hub = ChatHub::new();
         let room = RoomName::from("Room A");
-        let (alice_publisher, mut alice_inbox) =
-            hub.join(room.clone(), Client::from("alice")).split();
+        let (alice_publisher, alice_inbox) = hub.join(room.clone(), Client::from("alice")).split();
         let (bob_publisher, bob_inbox) = hub.join(room, Client::from("bob")).split();
-        let (mut output, mut writer) = tokio::io::duplex(1024);
+        let (input, session_reader) = tokio::io::duplex(1024);
+        let (mut output, session_writer) = tokio::io::duplex(1024);
+
+        let session = tokio::spawn(async move {
+            let mut writer = session_writer;
+            run_joined_session(
+                BufReader::new(session_reader),
+                &mut writer,
+                alice_publisher,
+                alice_inbox,
+            )
+            .await
+        });
 
         bob_publisher.publish("hello".to_string()).unwrap();
-        drop(alice_publisher);
+
+        let mut written = vec![0; "bob: hello\n".len()];
+        output.read_exact(&mut written).await.unwrap();
+
+        drop(input);
+        session.await.unwrap().unwrap();
+
+        assert_eq!(written, b"bob: hello\n");
+
         drop(bob_publisher);
         drop(bob_inbox);
         drop(hub);
-
-        write_messages(&mut writer, &mut alice_inbox).await.unwrap();
-        drop(writer);
-
-        let mut written = String::new();
-        output.read_to_string(&mut written).await.unwrap();
-
-        assert_eq!(written, "bob: hello\n");
     }
 
     #[test]
