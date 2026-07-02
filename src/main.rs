@@ -1,4 +1,4 @@
-use std::io::Result;
+use std::{io::Result, str::FromStr};
 
 use async_chat_server::{ChatHub, Client, RoomInbox, RoomName, RoomPublisher};
 use tokio::{
@@ -7,6 +7,62 @@ use tokio::{
 };
 
 const DEFAULT_ADDR: &str = "127.0.0.1:8080";
+
+#[derive(Debug, PartialEq, Eq)]
+enum ClientInput {
+    Message(String),
+    Switch(RoomName),
+    Leave,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ParseInputError {
+    MissingRoom,
+    Unknown(String),
+    EmptyInput,
+    UnexpectedArguments,
+}
+
+impl FromStr for ClientInput {
+    type Err = ParseInputError;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        if s.is_empty() {
+            return Err(ParseInputError::EmptyInput);
+        }
+
+        if !s.starts_with('/') {
+            return Ok(ClientInput::Message(s.to_owned()));
+        }
+
+        if s == "/leave" {
+            return Ok(ClientInput::Leave);
+        }
+
+        if let Some(args) = s.strip_prefix("/leave") {
+            if args.starts_with(char::is_whitespace) {
+                return Err(ParseInputError::UnexpectedArguments);
+            }
+        }
+
+        if s == "/switch" {
+            return Err(ParseInputError::MissingRoom);
+        }
+
+        if let Some(args) = s.strip_prefix("/switch") {
+            if args.starts_with(char::is_whitespace) {
+                let room = args.trim();
+                return if room.is_empty() {
+                    Err(ParseInputError::MissingRoom)
+                } else {
+                    Ok(ClientInput::Switch(RoomName::from(room)))
+                };
+            }
+        }
+
+        Err(ParseInputError::Unknown(s.to_owned()))
+    }
+}
 
 async fn ask<R, W>(msg: &str, reader: &mut R, writer: &mut W) -> Result<String>
 where
@@ -189,5 +245,101 @@ mod tests {
         output.read_to_string(&mut written).await.unwrap();
 
         assert_eq!(written, "bob: hello\n");
+    }
+
+    #[test]
+    fn client_input_message_from_str() {
+        let input = "hello";
+
+        let client_input: ClientInput = input.parse().unwrap();
+
+        assert_eq!(client_input, ClientInput::Message("hello".to_owned()))
+    }
+
+    #[test]
+    fn client_input_switch_from_str() {
+        let input = "/switch rust room";
+
+        let client_input: ClientInput = input.parse().unwrap();
+
+        assert_eq!(
+            client_input,
+            ClientInput::Switch(RoomName::from("rust room"))
+        )
+    }
+
+    #[test]
+    fn client_input_switch_from_str_missing_room() {
+        let input = "/switch";
+
+        let client_input = ClientInput::from_str(input).unwrap_err();
+
+        assert_eq!(client_input, ParseInputError::MissingRoom)
+    }
+
+    #[test]
+    fn client_input_switch_with_whitespace_from_str_missing_room() {
+        let input = "/switch   ";
+
+        let client_input = ClientInput::from_str(input).unwrap_err();
+
+        assert_eq!(client_input, ParseInputError::MissingRoom)
+    }
+
+    #[test]
+    fn client_input_switch_from_str_preserves_internal_spaces() {
+        let input = "/switch rust  room";
+
+        let client_input = ClientInput::from_str(input).unwrap();
+
+        assert_eq!(
+            client_input,
+            ClientInput::Switch(RoomName::from("rust  room"))
+        )
+    }
+
+    #[test]
+    fn client_input_leave_from_str() {
+        let input = "/leave";
+
+        let client_input = ClientInput::from_str(input).unwrap();
+
+        assert_eq!(client_input, ClientInput::Leave);
+    }
+
+    #[test]
+    fn client_input_leave_with_args_from_str() {
+        let input = "/leave something";
+
+        let client_input = ClientInput::from_str(input).unwrap_err();
+
+        assert_eq!(client_input, ParseInputError::UnexpectedArguments);
+    }
+
+    #[test]
+    fn client_input_unknown_from_str() {
+        let input = "/unknown_cmd";
+
+        let client_input = ClientInput::from_str(input).unwrap_err();
+
+        assert_eq!(client_input, ParseInputError::Unknown(input.to_owned()));
+    }
+
+    #[test]
+    fn client_input_unknown_slash_from_str() {
+        let input = "/";
+
+        let client_input = ClientInput::from_str(input).unwrap_err();
+
+        assert_eq!(client_input, ParseInputError::Unknown(input.to_owned()));
+    }
+
+    #[test]
+    fn client_input_empty_from_str() {
+        let input = "";
+
+        let client_input = ClientInput::from_str(input).unwrap_err();
+
+        assert_eq!(client_input, ParseInputError::EmptyInput);
     }
 }
