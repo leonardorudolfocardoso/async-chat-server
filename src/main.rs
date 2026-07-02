@@ -85,12 +85,26 @@ where
     writer.write_all(greetings.as_bytes()).await
 }
 
-async fn run_joined_session<R, W>(
-    reader: R,
-    writer: &mut W,
+#[derive(Debug)]
+struct JoinedRoom {
+    name: RoomName,
     publisher: RoomPublisher,
-    mut inbox: RoomInbox,
-) -> IoResult<()>
+    inbox: RoomInbox,
+}
+
+impl JoinedRoom {
+    fn join(hub: &ChatHub, name: RoomName, client: Client) -> Self {
+        let (publisher, inbox) = hub.join(name.clone(), client).split();
+
+        Self {
+            name,
+            publisher,
+            inbox,
+        }
+    }
+}
+
+async fn run_joined_session<R, W>(reader: R, writer: &mut W, mut room: JoinedRoom) -> IoResult<()>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -101,14 +115,14 @@ where
             input = lines.next_line() => {
                 match input? {
                     Some(line) => {
-                        if let Err(error) = publisher.publish(line) {
+                        if let Err(error) = room.publisher.publish(line) {
                             eprintln!("error publishing message: {error}");
                         }
                     }
                     None => return Ok(()),
                 }
             },
-            message = inbox.receive() => {
+            message = room.inbox.receive() => {
                 match message {
                     Some(message) => {
                         writer.write_all(message.to_string().as_bytes()).await?;
@@ -133,10 +147,7 @@ async fn handle(stream: TcpStream, hub: ChatHub) -> IoResult<()> {
         .into();
     greet(&mut writer, &room, &client).await?;
 
-    let membership = hub.join(room, client);
-    let (publisher, inbox) = membership.split();
-
-    run_joined_session(reader, &mut writer, publisher, inbox).await
+    run_joined_session(reader, &mut writer, JoinedRoom::join(&hub, room, client)).await
 }
 
 fn bind_addr_from_args(mut args: impl Iterator<Item = String>) -> String {
@@ -209,18 +220,18 @@ mod tests {
         let room_a = RoomName::from("Room A");
         let alice = Client::from("alice");
         let bob = Client::from("bob");
-        let (alices_publisher, alices_inbox) = hub.join(room_a.clone(), alice.clone()).split();
-        let (_, mut bobs_inbox) = hub.join(room_a, bob.clone()).split();
+        let alices_joined_room = JoinedRoom::join(&hub, room_a.clone(), alice.clone());
+        let mut bobs_joined_room = JoinedRoom::join(&hub, room_a, bob);
 
-        run_joined_session(reader, &mut writer, alices_publisher, alices_inbox)
+        run_joined_session(reader, &mut writer, alices_joined_room)
             .await
             .unwrap();
 
-        let first = bobs_inbox.receive().await.unwrap();
+        let first = bobs_joined_room.inbox.receive().await.unwrap();
         assert!(&first.is_from(&alice));
         assert_eq!(first.text(), "hello");
 
-        let second = bobs_inbox.receive().await.unwrap();
+        let second = bobs_joined_room.inbox.receive().await.unwrap();
         assert!(&second.is_from(&alice));
         assert_eq!(second.text(), "world");
     }
@@ -229,8 +240,8 @@ mod tests {
     async fn joined_session_writes_messages_with_the_sender() {
         let hub = ChatHub::new();
         let room = RoomName::from("Room A");
-        let (alice_publisher, alice_inbox) = hub.join(room.clone(), Client::from("alice")).split();
-        let (bob_publisher, bob_inbox) = hub.join(room, Client::from("bob")).split();
+        let alice_joined_room = JoinedRoom::join(&hub, room.clone(), Client::from("alice"));
+        let bob_joined_room = JoinedRoom::join(&hub, room, Client::from("bob"));
         let (input, session_reader) = tokio::io::duplex(1024);
         let (mut output, session_writer) = tokio::io::duplex(1024);
 
@@ -239,13 +250,15 @@ mod tests {
             run_joined_session(
                 BufReader::new(session_reader),
                 &mut writer,
-                alice_publisher,
-                alice_inbox,
+                alice_joined_room,
             )
             .await
         });
 
-        bob_publisher.publish("hello".to_string()).unwrap();
+        bob_joined_room
+            .publisher
+            .publish("hello".to_string())
+            .unwrap();
 
         let mut written = vec![0; "bob: hello\n".len()];
         output.read_exact(&mut written).await.unwrap();
@@ -255,8 +268,7 @@ mod tests {
 
         assert_eq!(written, b"bob: hello\n");
 
-        drop(bob_publisher);
-        drop(bob_inbox);
+        drop(bob_joined_room);
         drop(hub);
     }
 
