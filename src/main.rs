@@ -75,7 +75,7 @@ impl FromStr for ClientInput {
     }
 }
 
-async fn ask<R, W>(msg: &str, reader: &mut R, writer: &mut W) -> IoResult<String>
+async fn ask<R, W>(msg: &str, reader: &mut R, writer: &mut W) -> IoResult<Option<String>>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -83,9 +83,9 @@ where
     writer.write_all(msg.as_bytes()).await?;
 
     let mut response = String::new();
-    reader.read_line(&mut response).await?;
+    let bytes_read = reader.read_line(&mut response).await?;
 
-    Ok(response)
+    Ok((bytes_read != 0).then_some(response))
 }
 
 async fn greet<W>(writer: &mut W, room: &RoomName, name: &Client) -> IoResult<()>
@@ -202,12 +202,15 @@ async fn handle(stream: TcpStream, hub: ChatHub) -> IoResult<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
 
-    let client = ask("who are you?\n", &mut reader, &mut writer)
-        .await?
-        .into();
-    let room = ask("tell me your room\n", &mut reader, &mut writer)
-        .await?
-        .into();
+    let Some(client) = ask("who are you?\n", &mut reader, &mut writer).await? else {
+        return Ok(());
+    };
+    let client = client.into();
+
+    let Some(room) = ask("tell me your room\n", &mut reader, &mut writer).await? else {
+        return Ok(());
+    };
+    let room = room.into();
     greet(&mut writer, &room, &client).await?;
 
     run_session(
@@ -275,9 +278,23 @@ mod tests {
         let mut reader = BufReader::new(" some response\n".as_bytes());
         let mut writer = Vec::new();
 
-        let response = ask("a question\n", &mut reader, &mut writer).await.unwrap();
+        let response = ask("a question\n", &mut reader, &mut writer)
+            .await
+            .unwrap()
+            .unwrap();
 
         assert_eq!(response, " some response\n".to_string());
+        assert_eq!(writer, b"a question\n".to_vec());
+    }
+
+    #[tokio::test]
+    async fn ask_returns_none_when_the_client_disconnects() {
+        let mut reader = BufReader::new("".as_bytes());
+        let mut writer = Vec::new();
+
+        let response = ask("a question\n", &mut reader, &mut writer).await.unwrap();
+
+        assert_eq!(response, None);
         assert_eq!(writer, b"a question\n".to_vec());
     }
 
