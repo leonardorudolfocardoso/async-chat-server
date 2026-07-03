@@ -1,6 +1,6 @@
-use std::{io::Result as IoResult, str::FromStr};
+use std::{fmt::Display, io::Result as IoResult, str::FromStr};
 
-use async_chat_server::{ChatHub, Client, RoomInbox, RoomName, RoomPublisher};
+use async_chat_server::{ChatHub, Client, Message, RoomInbox, RoomName, RoomPublisher};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
@@ -21,6 +21,17 @@ enum ParseInputError {
     Unknown(String),
     EmptyInput,
     UnexpectedArguments,
+}
+
+impl Display for ParseInputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingRoom => write!(f, "ParseInputError: missing room"),
+            Self::Unknown(unknown) => write!(f, "ParseInputError: unknown input {unknown}"),
+            Self::EmptyInput => write!(f, "ParseInputError: empty input"),
+            Self::UnexpectedArguments => write!(f, "ParseInputError: unexpected arguments"),
+        }
+    }
 }
 
 impl FromStr for ClientInput {
@@ -104,32 +115,69 @@ impl JoinedRoom {
     }
 }
 
-async fn run_joined_session<R, W>(reader: R, writer: &mut W, mut room: JoinedRoom) -> IoResult<()>
+enum SessionEvent {
+    Input(ClientInput),
+    InvalidInput(ParseInputError),
+    Disconnected,
+    RoomMessage(Option<Message>),
+}
+
+fn session_input(line: Option<String>) -> SessionEvent {
+    match line {
+        Some(line) => match line.parse() {
+            Ok(input) => SessionEvent::Input(input),
+            Err(error) => SessionEvent::InvalidInput(error),
+        },
+        None => SessionEvent::Disconnected,
+    }
+}
+
+async fn run_session<R, W>(reader: R, writer: &mut W, mut room: JoinedRoom) -> IoResult<()>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
     let mut lines = reader.lines();
     loop {
-        tokio::select! {
-            input = lines.next_line() => {
-                match input? {
-                    Some(line) => {
-                        if let Err(error) = room.publisher.publish(line) {
-                            eprintln!("error publishing message: {error}");
-                        }
-                    }
-                    None => return Ok(()),
+        let event = tokio::select! {
+            input = lines.next_line() => session_input(input?),
+            message = room.inbox.receive() => SessionEvent::RoomMessage(message),
+        };
+
+        match event {
+            SessionEvent::Input(ClientInput::Message(text)) => {
+                if let Err(error) = room.publisher.publish(text) {
+                    eprintln!("error publishing message: {error}");
                 }
-            },
-            message = room.inbox.receive() => {
-                match message {
-                    Some(message) => {
-                        writer.write_all(message.to_string().as_bytes()).await?;
-                        writer.write_all(b"\n").await?;
-                    },
-                    None => return Ok(()),
-                }
+            }
+
+            SessionEvent::Input(ClientInput::Leave) => {
+                let response = format!("left room {}\n", room.name);
+                writer.write_all(response.as_bytes()).await?;
+                return Ok(());
+            }
+
+            SessionEvent::Input(ClientInput::Switch(_)) => {
+                writer
+                    .write_all(b"error: switching rooms is not supported yet\n")
+                    .await?;
+            }
+
+            SessionEvent::InvalidInput(error) => {
+                eprintln!("{error}");
+                writer.write_all(b"error: invalid input\n").await?;
+            }
+
+            SessionEvent::Disconnected => return Ok(()),
+
+            SessionEvent::RoomMessage(Some(message)) => {
+                let response = format!("{message}\n");
+                writer.write_all(response.as_bytes()).await?;
+            }
+
+            SessionEvent::RoomMessage(None) => {
+                writer.write_all(b"error: room closed\n").await?;
+                return Ok(());
             }
         }
     }
@@ -147,7 +195,7 @@ async fn handle(stream: TcpStream, hub: ChatHub) -> IoResult<()> {
         .into();
     greet(&mut writer, &room, &client).await?;
 
-    run_joined_session(reader, &mut writer, JoinedRoom::join(&hub, room, client)).await
+    run_session(reader, &mut writer, JoinedRoom::join(&hub, room, client)).await
 }
 
 fn bind_addr_from_args(mut args: impl Iterator<Item = String>) -> String {
@@ -223,7 +271,7 @@ mod tests {
         let alices_joined_room = JoinedRoom::join(&hub, room_a.clone(), alice.clone());
         let mut bobs_joined_room = JoinedRoom::join(&hub, room_a, bob);
 
-        run_joined_session(reader, &mut writer, alices_joined_room)
+        run_session(reader, &mut writer, alices_joined_room)
             .await
             .unwrap();
 
@@ -247,7 +295,7 @@ mod tests {
 
         let session = tokio::spawn(async move {
             let mut writer = session_writer;
-            run_joined_session(
+            run_session(
                 BufReader::new(session_reader),
                 &mut writer,
                 alice_joined_room,
@@ -270,6 +318,39 @@ mod tests {
 
         drop(bob_joined_room);
         drop(hub);
+    }
+
+    #[tokio::test]
+    async fn session_leave_acknowledges_the_room_and_ends_the_session() {
+        let hub = ChatHub::new();
+        let room = RoomName::from("Room A");
+        let joined_room = JoinedRoom::join(&hub, room, Client::from("alice"));
+        let reader = BufReader::new("/leave\nmessage after leave\n".as_bytes());
+        let mut writer = Vec::new();
+
+        run_session(reader, &mut writer, joined_room).await.unwrap();
+
+        assert_eq!(writer, b"left room Room A\n");
+    }
+
+    #[tokio::test]
+    async fn invalid_leave_reports_an_error_and_keeps_the_session_active() {
+        let hub = ChatHub::new();
+        let room = RoomName::from("Room A");
+        let alice = Client::from("alice");
+        let alices_joined_room = JoinedRoom::join(&hub, room.clone(), alice.clone());
+        let mut bobs_joined_room = JoinedRoom::join(&hub, room, Client::from("bob"));
+        let reader = BufReader::new("/leave now\nhello\n".as_bytes());
+        let mut writer = Vec::new();
+
+        run_session(reader, &mut writer, alices_joined_room)
+            .await
+            .unwrap();
+
+        let message = bobs_joined_room.inbox.receive().await.unwrap();
+        assert!(message.is_from(&alice));
+        assert_eq!(message.text(), "hello");
+        assert_eq!(writer, b"error: invalid input\n");
     }
 
     #[test]
