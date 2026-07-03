@@ -46,7 +46,7 @@ who are you?
 tell me your room
 ```
 
-After entering a name, type messages and press Enter. Messages are sent to
+After entering a name and room, type messages and press Enter. Messages are sent to
 other connected clients in this format:
 
 ```text
@@ -55,6 +55,23 @@ alice: hello
 
 The sender does not receive their own messages back, and clients in other rooms
 do not receive the message.
+
+### Session Commands
+
+Commands begin with `/` and are not broadcast as chat messages:
+
+```text
+/switch <room>
+/leave
+```
+
+`/switch <room>` atomically replaces the current room membership while keeping
+the same client name and TCP connection. The server replies with
+`switched to room <room>`, or `already in room <room>` when no change is needed.
+
+`/leave` replies with `left room <room>` and closes that client's connection.
+Invalid commands and empty input receive `error: invalid input` without ending
+the session.
 
 ## Manual Test
 
@@ -78,8 +95,13 @@ Send a message from Alice and verify that:
 - Alice does not receive her own message.
 - Carol receives nothing.
 
-Then send messages from Bob and Carol to verify delivery within each room and
-isolation between rooms. Use `Ctrl+C` to close each client and the server.
+Then have Alice enter `/switch music`. Verify that Alice receives the switch
+acknowledgement, no longer receives messages from `rust`, and can exchange
+messages with Carol in `music`. Enter `/switch music` again to verify the
+same-room acknowledgement.
+
+Enter `/leave` to verify that the server acknowledges the current room and
+closes that client connection. Use `Ctrl+C` to stop the server.
 
 ## Tests
 
@@ -103,8 +125,11 @@ The current tests cover the domain and protocol helper logic:
 - room inbox filtering and lag recovery
 - bind address argument parsing
 - connection prompt handling
-- propagation of input lines through a room publisher
-- formatted message output
+- clean disconnects during connection prompts and active sessions
+- session command parsing and invalid input handling
+- room switching, same-room no-ops, and old/new room isolation
+- leave acknowledgement and connection termination
+- message publishing and formatted output
 
 ## Design Notes
 
@@ -121,8 +146,9 @@ Important internal boundaries:
 - `RoomPublisher` publishes messages to one room.
 - `RoomInbox` receives messages from one room and owns lag recovery and sender filtering.
 - `ask` handles connection prompts.
-- `propagate_messages` reads client input and publishes messages.
-- `write_messages` receives broadcast messages and writes them to a client.
+- `ClientInput` distinguishes chat messages from switch and leave commands.
+- `JoinedRoom` owns one client's complete membership and replaces it atomically when switching.
+- `run_session` selects between client input and room messages in one task.
 - `handle` wires one TCP connection into the chat flow.
 
 Each room owns a Tokio broadcast channel. Channel behavior is encapsulated by
@@ -136,7 +162,6 @@ sequenceDiagram
     participant Server
     participant Hub as Chat Hub
     participant Bus as Room Channel
-    participant BWriter as Client B Writer Task
     participant B as Client B
 
     A->>Server: connect
@@ -146,19 +171,27 @@ sequenceDiagram
     Server->>Hub: join(rust, alice)
     Hub-->>Server: room membership
     Server->>A: welcome to room rust, alice
-    Server->>Server: spawn writer task
 
     A->>Server: hello
     Server->>Bus: publish Message(alice, hello)
-    Bus->>BWriter: deliver message
-    BWriter->>B: alice: hello
+    Bus->>Server: deliver message to Bob's session
+    Server->>B: alice: hello
+
+    A->>Server: /switch music
+    Server->>Hub: join(music, alice)
+    Hub-->>Server: replacement membership
+    Server->>A: switched to room music
+
+    A->>Server: /leave
+    Server->>A: left room music
+    Server--xA: close connection
 ```
 
 ## Current Limitations
 
 - There is no graceful shutdown handling.
 - Client names are not checked for uniqueness.
-- Empty names and empty messages are currently allowed.
+- Empty names are currently allowed; empty chat input is rejected.
 - There is no persistence, authentication, or transport security.
 - Full TCP integration behavior is not covered by tests yet.
 - Empty rooms are retained for the lifetime of the server.
