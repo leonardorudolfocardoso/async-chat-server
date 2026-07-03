@@ -50,25 +50,25 @@ impl FromStr for ClientInput {
             return Ok(ClientInput::Leave);
         }
 
-        if let Some(args) = s.strip_prefix("/leave") {
-            if args.starts_with(char::is_whitespace) {
-                return Err(ParseInputError::UnexpectedArguments);
-            }
+        if let Some(args) = s.strip_prefix("/leave")
+            && args.starts_with(char::is_whitespace)
+        {
+            return Err(ParseInputError::UnexpectedArguments);
         }
 
         if s == "/switch" {
             return Err(ParseInputError::MissingRoom);
         }
 
-        if let Some(args) = s.strip_prefix("/switch") {
-            if args.starts_with(char::is_whitespace) {
-                let room = args.trim();
-                return if room.is_empty() {
-                    Err(ParseInputError::MissingRoom)
-                } else {
-                    Ok(ClientInput::Switch(RoomName::from(room)))
-                };
-            }
+        if let Some(args) = s.strip_prefix("/switch")
+            && args.starts_with(char::is_whitespace)
+        {
+            let room = args.trim();
+            return if room.is_empty() {
+                Err(ParseInputError::MissingRoom)
+            } else {
+                Ok(ClientInput::Switch(RoomName::from(room)))
+            };
         }
 
         Err(ParseInputError::Unknown(s.to_owned()))
@@ -99,19 +99,24 @@ where
 #[derive(Debug)]
 struct JoinedRoom {
     name: RoomName,
+    client: Client,
     publisher: RoomPublisher,
     inbox: RoomInbox,
 }
 
 impl JoinedRoom {
     fn join(hub: &ChatHub, name: RoomName, client: Client) -> Self {
-        let (publisher, inbox) = hub.join(name.clone(), client).split();
+        let (publisher, inbox) = hub.join(name.clone(), client.clone()).split();
 
         Self {
             name,
+            client,
             publisher,
             inbox,
         }
+    }
+    fn switch(self, hub: &ChatHub, name: RoomName) -> Self {
+        Self::join(hub, name, self.client)
     }
 }
 
@@ -132,7 +137,12 @@ fn session_input(line: Option<String>) -> SessionEvent {
     }
 }
 
-async fn run_session<R, W>(reader: R, writer: &mut W, mut room: JoinedRoom) -> IoResult<()>
+async fn run_session<R, W>(
+    reader: R,
+    writer: &mut W,
+    hub: &ChatHub,
+    mut room: JoinedRoom,
+) -> IoResult<()>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
@@ -157,10 +167,15 @@ where
                 return Ok(());
             }
 
-            SessionEvent::Input(ClientInput::Switch(_)) => {
-                writer
-                    .write_all(b"error: switching rooms is not supported yet\n")
-                    .await?;
+            SessionEvent::Input(ClientInput::Switch(to)) => {
+                let response = if room.name == to {
+                    format!("already in room {to}\n")
+                } else {
+                    room = room.switch(hub, to.clone());
+                    format!("switched to room {to}\n")
+                };
+
+                writer.write_all(response.as_bytes()).await?;
             }
 
             SessionEvent::InvalidInput(error) => {
@@ -195,7 +210,13 @@ async fn handle(stream: TcpStream, hub: ChatHub) -> IoResult<()> {
         .into();
     greet(&mut writer, &room, &client).await?;
 
-    run_session(reader, &mut writer, JoinedRoom::join(&hub, room, client)).await
+    run_session(
+        reader,
+        &mut writer,
+        &hub,
+        JoinedRoom::join(&hub, room, client),
+    )
+    .await
 }
 
 fn bind_addr_from_args(mut args: impl Iterator<Item = String>) -> String {
@@ -233,7 +254,7 @@ async fn main() -> IoResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncReadExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn bind_addr_from_args_uses_default_when_arg_is_missing() {
@@ -271,7 +292,7 @@ mod tests {
         let alices_joined_room = JoinedRoom::join(&hub, room_a.clone(), alice.clone());
         let mut bobs_joined_room = JoinedRoom::join(&hub, room_a, bob);
 
-        run_session(reader, &mut writer, alices_joined_room)
+        run_session(reader, &mut writer, &hub, alices_joined_room)
             .await
             .unwrap();
 
@@ -292,12 +313,14 @@ mod tests {
         let bob_joined_room = JoinedRoom::join(&hub, room, Client::from("bob"));
         let (input, session_reader) = tokio::io::duplex(1024);
         let (mut output, session_writer) = tokio::io::duplex(1024);
+        let session_hub = hub.clone();
 
         let session = tokio::spawn(async move {
             let mut writer = session_writer;
             run_session(
                 BufReader::new(session_reader),
                 &mut writer,
+                &session_hub,
                 alice_joined_room,
             )
             .await
@@ -328,7 +351,9 @@ mod tests {
         let reader = BufReader::new("/leave\nmessage after leave\n".as_bytes());
         let mut writer = Vec::new();
 
-        run_session(reader, &mut writer, joined_room).await.unwrap();
+        run_session(reader, &mut writer, &hub, joined_room)
+            .await
+            .unwrap();
 
         assert_eq!(writer, b"left room Room A\n");
     }
@@ -343,7 +368,7 @@ mod tests {
         let reader = BufReader::new("/leave now\nhello\n".as_bytes());
         let mut writer = Vec::new();
 
-        run_session(reader, &mut writer, alices_joined_room)
+        run_session(reader, &mut writer, &hub, alices_joined_room)
             .await
             .unwrap();
 
@@ -351,6 +376,67 @@ mod tests {
         assert!(message.is_from(&alice));
         assert_eq!(message.text(), "hello");
         assert_eq!(writer, b"error: invalid input\n");
+    }
+
+    #[tokio::test]
+    async fn switching_to_the_current_room_is_a_no_op() {
+        let hub = ChatHub::new();
+        let room = RoomName::from("Room A");
+        let joined_room = JoinedRoom::join(&hub, room, Client::from("alice"));
+        let reader = BufReader::new("/switch Room A\n".as_bytes());
+        let mut writer = Vec::new();
+
+        run_session(reader, &mut writer, &hub, joined_room)
+            .await
+            .unwrap();
+
+        assert_eq!(writer, b"already in room Room A\n");
+    }
+
+    #[tokio::test]
+    async fn switching_replaces_old_room_delivery_with_new_room_delivery() {
+        let hub = ChatHub::new();
+        let room_a = RoomName::from("Room A");
+        let room_b = RoomName::from("Room B");
+        let alice_joined_room = JoinedRoom::join(&hub, room_a.clone(), Client::from("alice"));
+        let old_room_member = JoinedRoom::join(&hub, room_a, Client::from("old-bob"));
+        let new_room_member = JoinedRoom::join(&hub, room_b, Client::from("new-bob"));
+        let (mut input, session_reader) = tokio::io::duplex(1024);
+        let (mut output, session_writer) = tokio::io::duplex(1024);
+        let session_hub = hub.clone();
+
+        let session = tokio::spawn(async move {
+            let mut writer = session_writer;
+            run_session(
+                BufReader::new(session_reader),
+                &mut writer,
+                &session_hub,
+                alice_joined_room,
+            )
+            .await
+        });
+
+        input.write_all(b"/switch Room B\n").await.unwrap();
+
+        let mut acknowledgement = vec![0; "switched to room Room B\n".len()];
+        output.read_exact(&mut acknowledgement).await.unwrap();
+        assert_eq!(acknowledgement, b"switched to room Room B\n");
+
+        old_room_member
+            .publisher
+            .publish("old room message".to_string())
+            .unwrap();
+        new_room_member
+            .publisher
+            .publish("new room message".to_string())
+            .unwrap();
+
+        let mut delivered = vec![0; "new-bob: new room message\n".len()];
+        output.read_exact(&mut delivered).await.unwrap();
+        assert_eq!(delivered, b"new-bob: new room message\n");
+
+        drop(input);
+        session.await.unwrap().unwrap();
     }
 
     #[test]
