@@ -153,6 +153,9 @@ Important internal boundaries:
 
 Each room owns a Tokio broadcast channel. Channel behavior is encapsulated by
 the room publisher and inbox rather than exposed to connection handling.
+Each room currently buffers up to 16 pending messages per receiver. If a
+receiver falls behind that bounded buffer, older messages may be skipped for
+that receiver.
 
 ### Message Flow
 

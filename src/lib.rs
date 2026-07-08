@@ -12,6 +12,8 @@ pub use message::Message;
 mod client;
 pub use client::Client;
 
+const ROOM_MESSAGE_CAPACITY: usize = 16;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RoomName(String);
 
@@ -40,7 +42,7 @@ struct Room {
 
 impl Room {
     fn new() -> Self {
-        let (sender, _) = broadcast::channel(16);
+        let (sender, _) = broadcast::channel(ROOM_MESSAGE_CAPACITY);
         Self { sender }
     }
     fn join(&mut self, client: Client) -> RoomMembership {
