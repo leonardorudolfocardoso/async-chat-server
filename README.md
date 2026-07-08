@@ -204,6 +204,39 @@ Unhandled or intentionally unrecovered failures:
 - Slow clients may stall their own session because there are no write timeouts.
 - There is no graceful shutdown path.
 
+### Distributed Systems Study Hooks
+
+This project intentionally keeps coordination inside one process. The questions
+below connect current design choices to distributed systems topics by asking
+what would change if the server needed stronger delivery guarantees, durable
+state, slow-consumer handling, or multiple nodes.
+
+Current design choices that raise these questions:
+
+- Rooms are in memory in one `ChatHub`.
+- Messages are fanned out through bounded Tokio broadcast channels.
+- Lagged receivers skip messages without client notification.
+- Messages have no durable IDs, acknowledgements, or replay.
+- One process owns all room membership.
+
+Study questions:
+
+- What delivery guarantee should chat messages have: best-effort, at-least-once,
+  or something stronger?
+- Should slow clients apply backpressure, miss messages, or be disconnected?
+- Should clients be told when messages were skipped because their receiver
+  lagged?
+- Should message history survive server restart, and which component would own
+  durable storage?
+- If the server runs on multiple nodes, can one room span nodes, and how are
+  messages fanned out across them?
+- What ordering guarantee matters: per-room order, per-sender order, or causal
+  order?
+- Who owns room membership and presence if multiple server instances can accept
+  clients?
+- How should the system behave during network partitions or partial node
+  failures?
+
 ### Message Flow
 
 ```mermaid
