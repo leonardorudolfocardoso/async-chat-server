@@ -231,27 +231,22 @@ async fn main() -> IoResult<()> {
     let addr = bind_addr_from_args(std::env::args().skip(1));
 
     let hub = ChatHub::new();
+    let listener = TcpListener::bind(&addr).await?;
 
-    match TcpListener::bind(&addr).await {
-        // server binded
-        Ok(listener) => loop {
-            match listener.accept().await {
-                // client connected
-                Ok((stream, _)) => {
-                    let hub = hub.clone();
-                    tokio::spawn(async move {
-                        if let Err(error) = handle(stream, hub).await {
-                            eprintln!("connection error: {error}");
-                        }
-                    });
-                }
-                Err(e) => eprintln!("{e}"),
+    loop {
+        match listener.accept().await {
+            // client connected
+            Ok((stream, _)) => {
+                let hub = hub.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = handle(stream, hub).await {
+                        eprintln!("connection error: {error}");
+                    }
+                });
             }
-        },
-        Err(e) => eprintln!("{e}"),
+            Err(e) => eprintln!("{e}"),
+        }
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
