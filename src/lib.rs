@@ -93,6 +93,8 @@ impl ChatHub {
     }
 
     pub fn join(&self, room: RoomName, client: Client) -> RoomMembership {
+        // Treat a poisoned room registry as unrecoverable rather than continuing
+        // with potentially inconsistent shared state.
         let mut rooms = self.rooms.lock().unwrap();
         let room = rooms.entry(room).or_insert_with(Room::new);
 
