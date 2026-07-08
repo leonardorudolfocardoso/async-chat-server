@@ -183,6 +183,27 @@ safe to use in this `select!` loop: if one branch wins, dropping the other
 pending branch does not consume a client line or room message. Message loss can
 still happen when a room receiver falls behind the bounded broadcast buffer.
 
+### Failure Behavior
+
+Handled failures:
+
+- Client disconnects during prompts or active sessions end that connection
+  cleanly.
+- Invalid session commands return `error: invalid input` and keep the session
+  open.
+- Connection I/O errors are logged and close only that connection.
+- Listener accept errors are logged and the server keeps accepting new
+  connections.
+- Room receiver lag is skipped according to the best-effort delivery policy.
+- Startup bind failure is returned from `main` and terminates the server.
+
+Unhandled or intentionally unrecovered failures:
+
+- Room registry mutex poisoning is treated as unrecoverable and may panic.
+- Spawned connection task panics are not supervised.
+- Slow clients may stall their own session because there are no write timeouts.
+- There is no graceful shutdown path.
+
 ### Message Flow
 
 ```mermaid
