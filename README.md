@@ -157,6 +157,32 @@ Each room currently buffers up to 16 pending messages per receiver. If a
 receiver falls behind that bounded buffer, older messages may be skipped for
 that receiver.
 
+### Async Model
+
+The server runs on Tokio and spawns one async task per accepted TCP connection.
+Each connection task handles that client's prompt flow, room membership, input,
+and output.
+
+Inside an active chat session, `run_session` uses `tokio::select!` to wait for
+whichever event is ready first:
+
+- the TCP client sends the next input line
+- the current room inbox receives a message from another client
+
+Normal input lines are published through the room's `RoomPublisher`. Incoming
+room messages are written back to the client's TCP stream. This lets one task
+handle both directions of the connection without splitting the connection into
+separate reader and writer tasks.
+
+The shared room registry uses `Arc<Mutex<HashMap<RoomName, Room>>>`. The mutex
+is held only while finding or creating a room, and is released before any
+network I/O or channel receive awaits.
+
+The selected operations, `lines.next_line()` and `RoomInbox::receive()`, are
+safe to use in this `select!` loop: if one branch wins, dropping the other
+pending branch does not consume a client line or room message. Message loss can
+still happen when a room receiver falls behind the bounded broadcast buffer.
+
 ### Message Flow
 
 ```mermaid
