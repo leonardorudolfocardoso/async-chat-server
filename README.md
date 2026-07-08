@@ -195,6 +195,8 @@ sequenceDiagram
 - There is no graceful shutdown handling.
 - Client names are not checked for uniqueness.
 - Empty names are currently allowed; empty chat input is rejected.
+- Message delivery is best-effort; slow receivers may miss messages when their
+  room buffer overflows.
 - There is no persistence, authentication, or transport security.
 - Full TCP integration behavior is not covered by tests yet.
 - Empty rooms are retained for the lifetime of the server.
